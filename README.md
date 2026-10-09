@@ -1,29 +1,10 @@
-const STORAGE_KEYS = {
-  users: 'cpf_users',
-  links: 'cpf_links',
-  updates: 'cpf_updates'
-};
-
 const state = {
-  users: readStorage(STORAGE_KEYS.users, []),
-  links: readStorage(STORAGE_KEYS.links, []),
-  updates: readStorage(STORAGE_KEYS.updates, []),
   currentUser: null,
-  page: 'home'
+  page: 'home',
+  links: [],
+  users: [],
+  updates: []
 };
-
-function readStorage(key, fallback) {
-  try {
-    const value = JSON.parse(localStorage.getItem(key));
-    return value ?? fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function writeStorage(key, value) {
-  localStorage.setItem(key, JSON.stringify(value));
-}
 
 function escapeHtml(value = '') {
   return String(value).replace(/[&<>"']/g, (char) => {
@@ -38,7 +19,7 @@ function escapeHtml(value = '') {
   });
 }
 
-function toast(message) {
+function showToast(message) {
   const toastEl = document.getElementById('toast');
   toastEl.textContent = message;
   toastEl.classList.add('show');
@@ -48,36 +29,76 @@ function toast(message) {
   }, 2200);
 }
 
-function persistUsers() {
-  writeStorage(STORAGE_KEYS.users, state.users);
-}
+async function apiRequest(path, options = {}) {
+  const response = await fetch(path, {
+    credentials: 'include',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    },
+    ...options
+  });
 
-function seedDemoData() {
-  if (!state.users.some((user) => user.username === 'admin')) {
-    state.users.push({
-      username: 'admin',
-      password: 'admin123',
-      name: 'ADMIN',
-      id: '10001',
-      admin: true,
-      avatar: '',
-      status: 'online'
-    });
-    persistUsers();
+  const contentType = response.headers.get('content-type') || '';
+  const data = contentType.includes('application/json') ? await response.json() : await response.text();
+
+  if (!response.ok) {
+    throw new Error(data?.message || 'Yêu cầu không thành công.');
   }
+
+  return data;
 }
 
-function generateUniqueFiveDigitId() {
-  let candidate = '';
-  do {
-    candidate = String(Math.floor(10000 + Math.random() * 90000));
-  } while (state.users.some((user) => user.id === candidate));
-  return candidate;
+function renderAvatar(user, sizeClass = '') {
+  if (user && user.avatar) {
+    return `<img class="avatar ${sizeClass}" src="${user.avatar}" alt="Ảnh đại diện ${escapeHtml(user.name || user.username || 'Thành viên')}" />`;
+  }
+
+  const initial = (user?.name || user?.username || '?').charAt(0).toUpperCase();
+  return `<div class="avatar ${sizeClass}">${escapeHtml(initial)}</div>`;
+}
+
+function setPage(page) {
+  state.page = page;
+  render();
+}
+
+async function init() {
+  try {
+    const session = await apiRequest('/api/session');
+    if (session.user) {
+      state.currentUser = session.user;
+      await loadDashboard();
+      render();
+      showUpdateNotice();
+      return;
+    }
+  } catch (error) {
+    console.error(error);
+  }
+
+  renderAuthScreen();
+}
+
+async function loadDashboard() {
+  try {
+    const [usersRes, linksRes, updatesRes] = await Promise.all([
+      apiRequest('/api/users'),
+      apiRequest('/api/links'),
+      apiRequest('/api/updates')
+    ]);
+
+    state.users = usersRes.users || [];
+    state.links = linksRes.links || [];
+    state.updates = updatesRes.updates || [];
+  } catch (error) {
+    console.error(error);
+    showToast('Không thể tải dữ liệu từ máy chủ.');
+  }
 }
 
 function renderAuthScreen() {
   state.currentUser = null;
-
   document.getElementById('logoutButton').classList.add('hidden');
   document.getElementById('bottomNav').classList.add('hidden');
 
@@ -85,7 +106,7 @@ function renderAuthScreen() {
     <section class="hero">
       <div class="eyebrow">Your digital space</div>
       <h1>Chào mừng đến<br>CLOUDPHONEFREE.</h1>
-      <p class="muted">Website tiện ích, cộng đồng thành viên và thông báo cập nhật được tổng hợp trong một không gian tối giản.</p>
+      <p class="muted">Một không gian tối giản để quản lý website, cộng đồng thành viên và thông báo cập nhật.</p>
     </section>
 
     <div class="grid" style="margin-top: 20px;">
@@ -100,7 +121,7 @@ function renderAuthScreen() {
           <input name="password" type="password" autocomplete="current-password" required />
         </label>
         <button type="submit" class="btn">Đăng nhập</button>
-        <small class="muted">Tài khoản demo admin: admin / admin123</small>
+        <small class="muted">Demo admin: admin / admin123</small>
       </form>
 
       <form id="registerForm" class="panel form-grid">
@@ -122,120 +143,79 @@ function renderAuthScreen() {
     </div>
 
     <div class="panel" style="margin-top: 20px;">
-      <p class="muted">Bản demo này lưu dữ liệu trên trình duyệt hiện tại. Tài khoản, link và cập nhật sẽ còn nguyên cho đến khi bạn xóa dữ liệu trình duyệt.</p>
+      <p class="muted">Bản demo này lưu thông tin trong máy chủ nội bộ của dự án. Đăng nhập, đăng ký, thêm link và đăng thông báo đều có thể hoạt động thực tế trên một website đã chạy.</p>
     </div>
   `;
 
-  document.getElementById('loginForm').addEventListener('submit', (event) => {
+  document.getElementById('loginForm').addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const username = String(form.get('username')).trim();
-    const password = String(form.get('password'));
-
-    const user = state.users.find(
-      (item) => item.username === username && item.password === password
-    );
-
-    if (!user) {
-      toast('Tên đăng nhập hoặc mật khẩu không chính xác.');
-      return;
-    }
-
-    enterUser(user);
-  });
-
-  document.getElementById('registerForm').addEventListener('submit', (event) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    const name = String(form.get('name')).trim();
-    const username = String(form.get('username')).trim();
-    const password = String(form.get('password'));
-
-    if (!name || !username || !password) {
-      toast('Vui lòng nhập đầy đủ thông tin.');
-      return;
-    }
-
-    if (!/^[a-zA-Z0-9_]{3,24}$/.test(username)) {
-      toast('Tên đăng nhập chỉ gồm chữ, số hoặc _ và dài 3–24 ký tự.');
-      return;
-    }
-
-    if (state.users.some((user) => user.username.toLowerCase() === username.toLowerCase())) {
-      toast('Tên đăng nhập đã tồn tại.');
-      return;
-    }
-
-    const newUser = {
-      username,
-      password,
-      name,
-      id: generateUniqueFiveDigitId(),
-      admin: false,
-      avatar: '',
-      status: 'offline'
+    const payload = {
+      username: String(form.get('username')).trim(),
+      password: String(form.get('password'))
     };
 
-    state.users.push(newUser);
-    persistUsers();
-    enterUser(newUser);
-    toast('Đăng ký thành công!');
+    try {
+      const result = await apiRequest('/api/login', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+
+      state.currentUser = result.user;
+      await loadDashboard();
+      render();
+      showUpdateNotice();
+      showToast('Đăng nhập thành công.');
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+
+  document.getElementById('registerForm').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const payload = {
+      name: String(form.get('name')).trim(),
+      username: String(form.get('username')).trim(),
+      password: String(form.get('password'))
+    };
+
+    try {
+      const result = await apiRequest('/api/register', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+
+      state.currentUser = result.user;
+      await loadDashboard();
+      render();
+      showUpdateNotice();
+      showToast('Đăng ký thành công.');
+    } catch (error) {
+      showToast(error.message);
+    }
   });
 }
 
-function enterUser(user) {
-  state.currentUser = user;
-  state.currentUser.status = 'online';
-  persistUsers();
-  document.getElementById('logoutButton').classList.remove('hidden');
-  document.getElementById('bottomNav').classList.remove('hidden');
-  document.getElementById('logoutButton').onclick = logoutUser;
-  render();
-  showUpdateNotice();
-}
-
-function logoutUser() {
-  if (state.currentUser) {
-    const matched = state.users.find((user) => user.id === state.currentUser.id);
-    if (matched) {
-      matched.status = 'offline';
-    }
-    persistUsers();
+async function logoutUser() {
+  try {
+    await apiRequest('/api/logout', { method: 'POST' });
+  } catch (error) {
+    console.error(error);
   }
 
   state.currentUser = null;
   renderAuthScreen();
 }
 
-function render() {
-  if (!state.currentUser) {
-    renderAuthScreen();
-    return;
-  }
-
-  const navButtons = document.querySelectorAll('.nav-item');
-  navButtons.forEach((button) => {
-    button.classList.toggle('active', button.dataset.page === state.page);
-  });
-
-  document.getElementById('app').innerHTML = state.page === 'home' ? renderHomePage() : renderProfilePage();
-
-  navButtons.forEach((button) => {
-    button.onclick = () => {
-      state.page = button.dataset.page;
-      render();
-    };
-  });
-
-  bindHomeEvents();
-  bindProfileEvents();
-}
-
 function renderHomePage() {
-  const items = state.links.length
+  const cards = state.links.length
     ? state.links
         .map((link, index) => {
-          const isAdmin = state.currentUser.admin;
+          const adminDelete = state.currentUser?.admin
+            ? `<button class="btn btn-danger" type="button" data-delete-link="${link.id}">Xóa liên kết</button>`
+            : '';
+
           return `
             <article class="link-card">
               <div class="icon">🌐</div>
@@ -244,7 +224,7 @@ function renderHomePage() {
                 <p class="muted">${escapeHtml(link.desc || 'Website được cộng đồng sử dụng.')}</p>
               </div>
               <a href="${safeUrl(link.url)}" target="_blank" rel="noopener noreferrer">Truy cập website ↗</a>
-              ${isAdmin ? `<button class="btn btn-danger" type="button" data-delete-link="${index}">Xóa liên kết</button>` : ''}
+              ${adminDelete}
             </article>
           `;
         })
@@ -252,7 +232,7 @@ function renderHomePage() {
     : `
       <div class="panel">
         <h2>Chưa có liên kết nào</h2>
-        <p class="muted">${state.currentUser.admin ? 'Vào phần “Tôi” → Cài đặt quản trị để thêm website đầu tiên.' : 'Admin hiện chưa thêm website nào. Hãy quay lại sau.'}</p>
+        <p class="muted">${state.currentUser.admin ? 'Vào phần “Tôi” → Cài đặt quản trị để thêm website đầu tiên.' : 'Admin đang cập nhật danh sách website. Hãy quay lại sau.'}</p>
       </div>
     `;
 
@@ -260,7 +240,7 @@ function renderHomePage() {
     <section class="hero">
       <div class="eyebrow">Trang chủ</div>
       <h1>Khám phá thế giới của bạn.</h1>
-      <p class="muted">Các website hữu ích, thành viên và cập nhật quan trọng được gom lại trong một không gian duy nhất.</p>
+      <p class="muted">Các website tiện ích, thành viên và cập nhật quan trọng được gom lại trong một không gian duy nhất.</p>
     </section>
 
     <div class="section-head">
@@ -269,7 +249,7 @@ function renderHomePage() {
     </div>
 
     <div class="grid">
-      ${items}
+      ${cards}
     </div>
   `;
 }
@@ -325,7 +305,7 @@ function renderAdminPanel() {
   return `
     <section class="panel" style="margin-top: 18px; border-color: rgba(92, 132, 255, 0.7);">
       <h2>⚙ Cài đặt quản trị</h2>
-      <p class="muted">Chỉ tài khoản admin được quyền quản trị website demo này.</p>
+      <p class="muted">Chỉ tài khoản admin được phép quản lý website và cập nhật.</p>
 
       <form id="addLinkForm" class="form-grid" style="margin-top: 16px;">
         <h3 style="margin-bottom: 0;">Thêm website</h3>
@@ -362,15 +342,6 @@ function renderAdminPanel() {
   `;
 }
 
-function renderAvatar(user, sizeClass) {
-  if (user.avatar) {
-    return `<img class="avatar ${sizeClass}" src="${user.avatar}" alt="Ảnh đại diện ${escapeHtml(user.name)}" />`;
-  }
-
-  const initial = (user.name || '?').charAt(0).toUpperCase();
-  return `<div class="avatar ${sizeClass}">${escapeHtml(initial)}</div>`;
-}
-
 function safeUrl(url) {
   try {
     const parsed = new URL(url);
@@ -378,158 +349,158 @@ function safeUrl(url) {
       return parsed.href;
     }
   } catch {
-    // ignore invalid URL
+    // ignore invalid
   }
   return '#';
 }
 
+function render() {
+  if (!state.currentUser) {
+    renderAuthScreen();
+    return;
+  }
+
+  document.getElementById('logoutButton').classList.remove('hidden');
+  document.getElementById('logoutButton').onclick = logoutUser;
+  document.getElementById('bottomNav').classList.remove('hidden');
+
+  document.querySelectorAll('.nav-item').forEach((button) => {
+    button.classList.toggle('active', button.dataset.page === state.page);
+  });
+
+  document.getElementById('app').innerHTML = state.page === 'home' ? renderHomePage() : renderProfilePage();
+
+  document.querySelectorAll('.nav-item').forEach((button) => {
+    button.onclick = () => setPage(button.dataset.page);
+  });
+
+  bindHomeEvents();
+  bindProfileEvents();
+}
+
 function bindHomeEvents() {
   document.querySelectorAll('[data-delete-link]').forEach((button) => {
-    button.onclick = () => {
-      const index = Number(button.dataset.deleteLink);
-      state.links.splice(index, 1);
-      writeStorage(STORAGE_KEYS.links, state.links);
-      render();
-      toast('Đã xóa liên kết.');
-    };
+    button.addEventListener('click', async () => {
+      try {
+        await apiRequest(`/api/links/${button.dataset.deleteLink}`, { method: 'DELETE' });
+        await loadDashboard();
+        render();
+        showToast('Đã xóa liên kết.');
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
   });
 }
 
 function bindProfileEvents() {
   document.getElementById('logoutSecondary')?.addEventListener('click', logoutUser);
 
-  document.getElementById('avatarInput')?.addEventListener('change', (event) => {
+  document.getElementById('avatarInput')?.addEventListener('change', async (event) => {
     const file = event.target.files[0];
     if (!file) return;
 
     if (file.size > 1200000) {
-      toast('Vui lòng chọn ảnh dưới 1.2MB.');
+      showToast('Vui lòng chọn ảnh dưới 1.2MB.');
       return;
     }
 
     const reader = new FileReader();
-    reader.onload = () => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const maxSize = 300;
-        const scale = Math.min(1, maxSize / Math.max(img.width, img.height));
-        canvas.width = img.width * scale;
-        canvas.height = img.height * scale;
+    reader.onload = async () => {
+      try {
+        const result = await apiRequest('/api/avatar', {
+          method: 'POST',
+          body: JSON.stringify({ avatarDataUrl: reader.result })
+        });
 
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-
-        const dataUrl = canvas.toDataURL('image/jpeg', 0.8);
-        state.currentUser.avatar = dataUrl;
-
-        const userMatch = state.users.find((user) => user.id === state.currentUser.id);
-        if (userMatch) {
-          userMatch.avatar = dataUrl;
-        }
-
-        persistUsers();
+        state.currentUser = result.user;
+        await loadDashboard();
         render();
-        toast('Đã cập nhật ảnh đại diện.');
-      };
-      img.src = reader.result;
+        showToast('Đã cập nhật ảnh đại diện.');
+      } catch (error) {
+        showToast(error.message);
+      }
     };
 
     reader.readAsDataURL(file);
   });
 
-  document.getElementById('addLinkForm')?.addEventListener('submit', (event) => {
+  document.getElementById('addLinkForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const title = String(form.get('title')).trim();
-    const desc = String(form.get('desc')).trim();
-    const url = String(form.get('url')).trim();
+    const payload = {
+      title: String(form.get('title')).trim(),
+      url: String(form.get('url')).trim(),
+      desc: String(form.get('desc')).trim()
+    };
 
     try {
-      const parsed = new URL(url);
-      if (!['http:', 'https:'].includes(parsed.protocol)) {
-        throw new Error('Invalid protocol');
-      }
-    } catch (error) {
-      toast('Đường dẫn URL không hợp lệ.');
-      return;
-    }
+      await apiRequest('/api/links', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
 
-    state.links.unshift({ title, desc, url });
-    writeStorage(STORAGE_KEYS.links, state.links);
-    event.currentTarget.reset();
-    render();
-    toast('Đã thêm liên kết mới.');
+      event.currentTarget.reset();
+      await loadDashboard();
+      render();
+      showToast('Đã thêm liên kết mới.');
+    } catch (error) {
+      showToast(error.message);
+    }
   });
 
-  document.getElementById('addUpdateForm')?.addEventListener('submit', (event) => {
+  document.getElementById('addUpdateForm')?.addEventListener('submit', async (event) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
-    const title = String(form.get('title')).trim();
-    const body = String(form.get('body')).trim();
+    const payload = {
+      title: String(form.get('title')).trim(),
+      body: String(form.get('body')).trim()
+    };
 
-    if (!title || !body) {
-      toast('Vui lòng điền đầy đủ tiêu đề và nội dung.');
-      return;
+    try {
+      await apiRequest('/api/updates', {
+        method: 'POST',
+        body: JSON.stringify(payload)
+      });
+
+      event.currentTarget.reset();
+      await loadDashboard();
+      render();
+      showUpdateNotice(true);
+      showToast('Đã đăng thông báo cập nhật.');
+    } catch (error) {
+      showToast(error.message);
     }
-
-    state.updates.unshift({
-      id: crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}`,
-      title,
-      body,
-      time: Date.now()
-    });
-    writeStorage(STORAGE_KEYS.updates, state.updates);
-    event.currentTarget.reset();
-    render();
-    showUpdateNotice(true);
-    toast('Đã đăng thông báo cập nhật.');
   });
 }
 
 function showUpdateNotice(force = false) {
+  if (!state.currentUser) return;
+
   const latest = state.updates[0];
   if (!latest) return;
 
-  const seenKey = `cpf_seen_${state.currentUser?.id || 'guest'}`;
-  const seen = readStorage(seenKey, []);
+  const seenKey = `cpf_seen_${state.currentUser.id}`;
+  const seen = JSON.parse(localStorage.getItem(seenKey) || '[]');
+  if (!force && seen.includes(latest.id)) return;
 
-  if (!force && seen.includes(latest.id)) {
-    return;
-  }
+  const overlay = document.getElementById('noticeOverlay');
+  const title = document.getElementById('noticeTitle');
+  const body = document.getElementById('noticeBody');
 
-  const noticeOverlay = document.getElementById('noticeOverlay');
-  const noticeTitle = document.getElementById('noticeTitle');
-  const noticeBody = document.getElementById('noticeBody');
-
-  noticeTitle.textContent = latest.title;
-  noticeBody.textContent = latest.body;
-  noticeOverlay.classList.remove('hidden');
+  title.textContent = latest.title;
+  body.textContent = latest.body;
+  overlay.classList.remove('hidden');
 
   const closeNotice = () => {
-    const currentSeen = readStorage(seenKey, []);
-    writeStorage(seenKey, [...new Set([...currentSeen, latest.id])]);
-    noticeOverlay.classList.add('hidden');
+    const currentSeen = JSON.parse(localStorage.getItem(seenKey) || '[]');
+    const nextSeen = Array.from(new Set([...currentSeen, latest.id]));
+    localStorage.setItem(seenKey, JSON.stringify(nextSeen));
+    overlay.classList.add('hidden');
   };
 
   document.getElementById('closeNotice').onclick = closeNotice;
   document.getElementById('noticeOk').onclick = closeNotice;
 }
 
-seedDemoData();
-renderAuthScreen();
-
-if (localStorage.getItem('cpf_session')) {
-  const sessionUser = state.users.find((user) => user.id === localStorage.getItem('cpf_session'));
-  if (sessionUser) {
-    enterUser(sessionUser);
-  }
-}
-
-window.addEventListener('beforeunload', () => {
-  if (state.currentUser) {
-    localStorage.setItem('cpf_session', state.currentUser.id);
-  } else {
-    localStorage.removeItem('cpf_session');
-  }
-});
+init();
